@@ -1,6 +1,6 @@
 /*
    Reading Temperature Data using Arduino Nano
-   Date: Apr 30, 2018
+   Date: May 12, 2018
 */
 
 #include <OneWire.h>                // Library for One-Wire interface
@@ -19,7 +19,7 @@ SoftwareSerial ESP(RX, TX);
 #define ONE_WIRE_LENGTH 8          // The number of pins used by the bus
 #define CALLIBRATION    0          // Used to callibrate the sensors (in C)
 #define MAX_SENSORS     20         // Allowed maximum number of sensors
-#define MESSAGE_DELAY   100        // Delay in ms between serial message
+#define MESSAGE_DELAY   250        // Delay in ms between serial message
 
 // Setting up the interface for OneWire communication
 OneWire oneWireBus[]  = {
@@ -75,7 +75,7 @@ void loop()
     // Getting temperature
     TempSensors_getTemp(&pOneWire);
     // Display current sensor readings and addresses
-    PrintValues(TempSensor, oneWire_count);
+    sendValues(TempSensor, oneWire_count);
   }
 }
 
@@ -114,37 +114,31 @@ void TempSensors_getTemp(oneWire_struct **_sensor)
 }
 
 // Sending values to esp over software-serial, hrdwr serial for debug
-// Format ADDR:STRING:VALUE:CRC8
-void PrintValues(oneWire_struct* TempSensor, uint8_t count)
+// Format COUNT:ADDR:STRING:VALUE:CRC8
+void sendValues(oneWire_struct* TempSensor, uint8_t count)
 {
   char buff[50], temp[10];
   byte CRC;
-
-  // Sending sensor count
-  sprintf(buff, "count%s%d", DELIM, count);
-  Serial.println(buff);
-  ESP.println(buff);
-  delay(MESSAGE_DELAY);
 
   // Sending sensor address and value
   // Format-> ADDR:STRING:VALUE
   for (uint8_t i = 0; i < count; i++)
   {
-    sprintf(buff, "");
-    // getting address
+    sprintf(buff, "%d%s", count, DELIM);
+    // appending address
     for (uint8_t d = 0; d < 8; d++) {
       sprintf(temp, "%02X", TempSensor[i].address[d]);
       strcat(buff, temp);
     }
-    // string
+    // appending string index
     sprintf(temp, "%s%d%s", DELIM, TempSensor[i].string, DELIM);
     strcat(buff, temp);
-    // sensor value
+    // appending sensor value
     dtostrf(TempSensor[i].value, 2, 2, temp);
     strcat(buff, temp);
-    // Calculating and appending CRC
+    // appending and calculating CRC
     CRC = OneWire::crc8((byte*)buff, strlen(buff));
-    sprintf(temp, "%s%d", DELIM, CRC);
+    sprintf(temp, "%s%02X", DELIM, CRC);
     strcat(buff, temp);
     // Printing
     Serial.println(buff);
@@ -152,4 +146,5 @@ void PrintValues(oneWire_struct* TempSensor, uint8_t count)
     // Delay between serial messages
     delay(MESSAGE_DELAY);
   }
+  Serial.println("\n");
 }

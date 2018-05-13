@@ -1,70 +1,184 @@
 /*
    Think Tank ESP Communication
    Author: Benjamin Sabean
-   Date: May 1, 2018
+   Date: May 12, 2018
 */
 
-// MQTT, HTTP & Soft AP
 #include <AERClient.h>
 #include <ESP8266WebServer.h>
 #include <EEPROM.h>
+#include <ESP_SSD1306.h>      // Modification of Adafruit_SSD1306 for ESP8266 compatibility
+#include <Adafruit_GFX.h>     // Needs a little change in original Adafruit library (See README.txt file)
+#include <SPI.h>              // For SPI comm (needed for not getting compile error)
+#include <Wire.h>             // For I2C comm
+#include <OneWire.h>          // Used only for crc8 algorithm (no object instantiated)
+#include <SoftwareSerial.h>   // Used for communication between ESP and Arduino
 
-// Display
-#include <ESP_SSD1306.h>    // Modification of Adafruit_SSD1306 for ESP8266 compatibility
-#include <Adafruit_GFX.h>   // Needs a little change in original Adafruit library (See README.txt file)
-#include <SPI.h>            // For SPI comm (needed for not getting compile error)
-#include <Wire.h>           // For I2C comm
-
-#include <OneWire.h>        // Used only for crc8 algorithm (no object instantiated)
-
-#define DEVICE_ID 8         // This device's unique ID as seen in the database
-#define DEBUG false         // Flag to determine if debug info is displayed 
-
-// Constants definition
-#define BUFFSIZE 80                   // Size for all character buffers
-#define TIMEOUT 60                    // Timeout for putting ESP into soft AP mode
-#define AP_SSID  "Think Tank"         // Name of soft-AP network
-#define DELIM ":"                     // Delimeter for serial communication
-#define SUBSCRIPTION "8/CONTROL/TIME" // MQTT topic to change sample time
-
+//
+//  DEFINITIONS
+//
+#define DEVICE_ID     8       // This device's unique ID as seen in the database
+#define BUFFSIZE      80      // Size for all character buffers
+#define TIMEOUT       60      // Timeout for putting ESP into soft AP mode
+#define AP_SSID       "Think Tank" // Name of soft-AP network
+#define DELIM         ":"     // Delimeter for serial communication
+#define SUBSCRIPTION  "8/CONTROL/TIME" // MQTT topic to change sample time
 // Pin defines
-#define BUTTON 14         // Interrupt to trigger soft AP mode
-#define STATUS_LIGHT 13   // Light to indicate that HTTP server is running
-#define OLED_RESET  16    // Pin 15 -RESET digital signal
+#define BUTTON        14  // Interrupt to trigger soft AP mode
+#define STATUS_LIGHT  13  // Light to indicate that HTTP server is running
+#define OLED_RESET    15  // Pin 15 -RESET digital signal
+#define RX            2   // SoftSerial COM RX
+#define TX            16  // SoftSerial COM TX
+#define COUNT_EVERY   10  // Send device count every 10 messages
 
-/* Wifi setup */
-char ssid[BUFFSIZE];       // Wi-Fi SSID
-char password[BUFFSIZE];   // Wi-Fi password
+//  Wifi setup
+char ssid[BUFFSIZE];      // Wi-Fi SSID
+char password[BUFFSIZE];  // Wi-Fi password
 char ip[BUFFSIZE] = "192.168.4.1";  // Default soft-AP ip address
-char msg[BUFFSIZE] = "";  // Container for serial message
-char topic[BUFFSIZE];     // The full MQTT topic
-char ch;                  // Current character in serial buffer
-char sAddr[BUFFSIZE], sVal[BUFFSIZE];   // Topic & data buffers for MQTT
-char buf[BUFFSIZE];    // Temporary buffer for building messages on display
-String tmp = "";       // Temproary buffer to build full topic name
-bool apMode = false;   // Flag to dermine current mode of operation
-bool corrupt = false;  // Flag to determine if serial buffer is corrupt
+char buf[BUFFSIZE];       // Temporary buffer for building messages on display
+volatile bool apMode = false;      // Flag to dermine current mode of operation
+volatile int loop_count = 0;
 
-/* Create Library Object password */
-AERClient aerServer(DEVICE_ID);
-ESP8266WebServer server(80);
+// Create Library Object password
+AERClient aerServer(DEVICE_ID);  // publishing to IoT cloud
+ESP8266WebServer server(80);     // webServer
+SoftwareSerial Arduino(RX, TX);  // for Serial
+ESP_SSD1306 display(OLED_RESET); // for I2C
 
-ESP_SSD1306 display(OLED_RESET); // FOR I2C
+//
+//  MAIN
+//
+void setup()
+{
+  // Set a callback function for MQTT
+  void (*pCallback)(char*, byte*, unsigned int);
+  pCallback = &callback;
 
+  // COM
+  Serial.begin(115200);
+  Arduino.begin(9600);
+  delay(100);  // Wait for serial port to connect
+  Serial.println("\n--- START ---");
+
+  // GPIO
+  pinMode(BUTTON, INPUT_PULLUP);
+  pinMode(STATUS_LIGHT, OUTPUT);
+
+  // SSD1306 OLED display init
+  display.begin(SSD1306_SWITCHCAPVCC);
+  display.display();
+  delay(2000);           // Display logo
+  display.clearDisplay();
+
+  // get SSID and password from EEPROM
+  EEPROM.begin(512);
+  strcpy(ssid, getString(0));
+  strcpy(password, getString(BUFFSIZE));
+
+  // Initialization and connection to WiFi
+  sprintf(buf, "%s\nConnecting\n...", ssid);
+  writeToDisplay("   WiFi", buf);
+  if (aerServer.init(ssid, password))
+  {
+    sprintf(buf, "%s\nONLINE", ssid);
+    writeToDisplay("   WiFi", buf);
+    aerServer.subscribe(SUBSCRIPTION, pCallback);
+    aerServer.debug();
+  }
+  else
+  {
+    Serial.println("Connection timed out");
+    Serial.print("SSID: ");     Serial.println(ssid);
+    Serial.print("Password: "); Serial.println(password);
+
+    sprintf(buf, "%s\nOFFLINE", ssid);
+    writeToDisplay("   WiFi", buf);
+  }
+}
+
+void loop()
+{
+  char addr[BUFFSIZE], topic[BUFFSIZE], val[BUFFSIZE], *p;
+  int _string = 0, count = 0;
+
+  //
+  //  AP Mode Enabled
+  //
+  if (apMode)
+  {
+    sprintf(buf, "SSID:%s\nIP:%s\n", AP_SSID, ip);
+    writeToDisplay(" AP Mode", buf);
+    server.handleClient();
+  }
+  //
+  //  WiFi connected, streaming Serial data
+  //
+  else
+  {
+    if (Arduino.available() > 0)
+    {
+      // Reading incomming data
+      readString(buf, sizeof(buf));
+      Serial.println();
+      Serial.println(buf);
+
+      // Validating all sections + CRC
+      if (validityCheck(buf) == 1)
+      {
+        Serial.println("String Validation FAILED");
+        return;   // Do not go further and post
+      }
+
+      // Breaking messsage down to sensor addres, string and value
+      if (parseData(buf, &count, addr, &_string, val))
+      {
+        Serial.println("Parsing FAILED");
+        return;
+      }
+
+      // Sending device count every 5 sensors
+      loop_count++;
+      if (loop_count > COUNT_EVERY)
+      {
+        loop_count = 0;
+        // Sending device count
+        sprintf(buf, "%d", count);
+        if (aerServer.publish("System/DeviceCount", buf)) Serial.println("Send: SUCCESS");
+        else                                              Serial.println("Send: FAILED");
+        delay(50);
+      }
+      // Sending sensor value
+      sprintf(topic, "Data/%s", addr);
+      Serial.print(topic); Serial.println(val);
+      if (aerServer.publish(topic, val)) Serial.println("Send: SUCCESS");
+      else                               Serial.println("Send: FAILED");
+      
+    }
+  }
+  if (!digitalRead(BUTTON))
+    btnHandler();
+
+  aerServer.loop();
+  delay(200);
+}
+
+
+//
+//  FUNCTIONS
+//
 //------------------------------------------------------
 // Get a string from EEPROM
-// @param startAddr the starting address of the string
-//            in EEPROM
-// @return char* the current string at the address given
-//            by startAddr
+// @param startAddr the starting address of the string in EEPROM
+// @return char* the current string at the address given by startAddr
 //-------------------------------------------------------
-char* getString(int startAddr) {
+char* getString(int startAddr)
+{
   char str[BUFFSIZE];
-  memset(str, NULL, BUFFSIZE);
+  memset(str, '\0', BUFFSIZE);
 
-  for (int i = 0; i < BUFFSIZE; i ++) {
+  for (int i = 0; i < BUFFSIZE; i ++)
     str[i] = char(EEPROM.read(startAddr + i));
-  }
+
   return str;
 }
 
@@ -85,8 +199,7 @@ void callback(char* topic, byte* payload, unsigned int length) {
 
 //------------------------------------------------------
 // Write to the SSD1306 OLED display
-// @param header A string to be printed in the header
-//               section of the display
+// @param header A string to be printed in the header section of the display
 // @param msg A string to displayed beneath th header
 // @return void
 //-------------------------------------------------------
@@ -111,9 +224,7 @@ void handleSubmit() {
   server.send(200, "text/html", content);
   digitalWrite(STATUS_LIGHT, LOW);
   //delay(500);
-#if DEBUG
   Serial.println("Restarting");
-#endif
   ESP.restart();
 }
 
@@ -124,7 +235,8 @@ void handleSubmit() {
 //-------------------------------------------------------
 void handleRoot() {
   String htmlmsg;
-  if (server.hasArg("SSID") && server.hasArg("PASSWORD")) {
+  if (server.hasArg("SSID") && server.hasArg("PASSWORD"))
+  {
     char newSSID[BUFFSIZE];
     char newPw[BUFFSIZE];
     memset(newSSID, NULL, BUFFSIZE);
@@ -162,9 +274,8 @@ void handleNotFound() {
   message += "\nArguments: ";
   message += server.args();
   message += "\n";
-  for (uint8_t i = 0; i < server.args(); i++) {
+  for (uint8_t i = 0; i < server.args(); i++)
     message += " " + server.argName(i) + ": " + server.arg(i) + "\n";
-  }
   server.send(404, "text/plain", message);
 }
 
@@ -174,36 +285,32 @@ void handleNotFound() {
 // @param none
 // @return void
 //-------------------------------------------------------
-void btnHandler() {
+void btnHandler()
+{
+  // LED indicator ON
   digitalWrite(STATUS_LIGHT, HIGH);
 
-  if (!apMode) {
+  if (!apMode)
+  {
     WiFi.disconnect(true);
-    //delay(500);
-
     // AP SERVER
-#if DEBUG
     Serial.println("Setting soft-AP");
-#endif
     WiFi.mode(WIFI_AP_STA);
-
-    for (int i = 0; i < TIMEOUT; i++) {
-      if (WiFi.softAP(AP_SSID)) {
+    for (int i = 0; i < TIMEOUT; i++, delay(10))
+    {
+      if (WiFi.softAP(AP_SSID))
         break;
-      }
-      delay(10);
     }
-#if DEBUG
     Serial.println("Ready");
-#endif
 
+    // Handlers
     server.on("/", handleRoot);
     server.on("/success", handleSubmit);
     server.on("/inline", []() {
       server.send(200, "text/plain", "this works without need of authentification");
     });
-
     server.onNotFound(handleNotFound);
+
     //here the list of headers to be recorded
     const char * headerkeys[] = {
       "User-Agent", "Cookie"
@@ -212,9 +319,8 @@ void btnHandler() {
     //ask server to track these headers
     server.collectHeaders(headerkeys, headerkeyssize );
     server.begin();
-#if DEBUG
+
     Serial.println("HTTP server started");
-#endif
 
     // Stop AERClient from reconnecting to Wi-Fi so that HTTP server
     // (in soft AP mode) will be more responsive when Wi-Fi credentials
@@ -222,196 +328,80 @@ void btnHandler() {
     aerServer.disableReconnect();
     apMode = true;
   }
-  else {
-#if DEBUG
+  else
     Serial.println("Already in soft AP mode!");
-#endif
-  }
 }
 
-void setup()
+
+//------------------------------------------------------
+// Read string of characters from serial monitor
+//-------------------------------------------------------
+void readString (char* buff, int len)
 {
-  // Set a callback function for MQTT
-  void (*pCallback)(char*, byte*, unsigned int);
-  pCallback = &callback;
-
-  // Set pins and baud rate
-  Serial.begin(9600);
-  delay(10);  // Wait for serial port to connect
-  pinMode(BUTTON, INPUT_PULLUP);
-  pinMode(STATUS_LIGHT, OUTPUT);
-#if DEBUG
-  Serial.println("\nStart");
-#endif
-
-  // SSD1306 OLED display init
-  display.begin(SSD1306_SWITCHCAPVCC);
-  display.display();
-  delay(2000);           // Display logo
-  display.clearDisplay();
-
-  // Empty ssid and password buffers
-  memset(ssid, NULL, BUFFSIZE);
-  memset(password, NULL, BUFFSIZE);
-
-  // Start communication with EEPROM
-  EEPROM.begin(512);
-  strcpy(ssid, getString(0));
-  strcpy(password, getString(BUFFSIZE));
-
-  // Initialization and connection to WiFi
-  writeToDisplay("Connecting", ssid);
-  if (aerServer.init(ssid, password)) {
-    writeToDisplay("Connected!", ssid);
-    aerServer.subscribe(SUBSCRIPTION, pCallback);
-#if DEBUG
-    Serial.println("Connected!");
-    aerServer.debug();
-#endif
-  }
-  else {
-#if DEBUG
-    Serial.println("Connection timed out");
-    Serial.print("SSID: ");    Serial.println(ssid);
-    Serial.print("Password: ");    Serial.println(password);
-#endif
-    writeToDisplay("Timed out", ssid);
-    attachInterrupt(digitalPinToInterrupt(BUTTON), btnHandler, FALLING);
-  }
-  Serial.readString();   // Empty Serial buffer
+  int i;
+  // Delay to wait for all data to come in
+  delay(40);
+  for (i = 0; i < len && Arduino.available() > 0; i++)
+    buff[i] = Arduino.read();
+  buff[i - 2] = '\0'; // Crop end of line [\n]
 }
 
-void loop()
+//------------------------------------------------------
+// Extracts the last byte for CRC and checks with internal CRC8
+// Return 0 if sucess, 1 if failed
+// Message format: COUNT:ADDR:STRING:VALUE:CRC8
+//-------------------------------------------------------
+bool validityCheck(const char* buff)
 {
-  if (apMode) {
-    char buf[BUFFSIZE];
-    String tmp = "";
-    memset(buf, NULL, BUFFSIZE);
-    tmp = String(AP_SSID) + "\n" + String(ip);
-    tmp.toCharArray(buf, BUFFSIZE);
-    writeToDisplay("Soft-AP", buf);
+  byte CRC_calc;
+  char _buff[BUFFSIZE], CRC_received[BUFFSIZE], *p;
 
-    server.handleClient();
-  }
-  else {
-    // Publish Data
-    while (Serial.available()) {
-      corrupt = false;
-      delay(10);
-      memset(msg, NULL, BUFFSIZE);
+  // Copying the buffer to not mess with incomming data
+  strcpy(_buff, buff);
+  // Extracting COUNT
+  if (strtok(_buff, DELIM) == NULL) return 1;
+  // Extracting ADDR
+  if (strtok(NULL, DELIM) == NULL) return 1;
+  // Extracting STRING
+  if (strtok(NULL, DELIM) == NULL) return 1;
+  // Extracting VALUE
+  if (strtok(NULL, DELIM) == NULL) return 1;
+  // Extracting CRC8
+  p = strtok(NULL, DELIM);
+  if (p == NULL) return 1;
+  strcpy(CRC_received, p);
+  // Calculatring CRC8 (!without the extra CRC byte and one byte delimiter!)
+  CRC_calc = OneWire::crc8((byte*)buff, strlen(buff) - 3);
+  sprintf(_buff, "%02X", CRC_calc);
+  // Check Equality
+  if (strcmp(CRC_received, _buff))
+    return 1;
+  else
+    return 0;
+}
 
-      for (int i = 0; i < BUFFSIZE; i ++) {  // Get Address
-        ch = Serial.read();
-        if (String(ch) == String(DELIM)) {  // Check for delimeter
-          break;
-        }
-        msg[i] = ch;
-        delay(10);           // Wait for Serial buffer
-        if (Serial.peek() == -1) {   // Check for missing data
-          memset(buf, NULL, BUFFSIZE);
-          tmp = String(ssid) + "\n" + "Corrupt Data";
-          tmp.toCharArray(buf, BUFFSIZE);
-          writeToDisplay("Status", buf);
-          corrupt = true;
-#if DEBUG
-          Serial.println("Data Missing");
-#endif
-          break;
-        }
-      }
-      strcpy(sAddr, msg);
-
-      memset(msg, NULL, BUFFSIZE);
-      for (int i = 0; i < BUFFSIZE; i ++) {  // Get Data
-        ch = Serial.read();
-        if (String(ch) == String("\n")) {
-          break;
-        }
-        msg[i] = ch;
-        delay(10);           // Wait for Serial buffer
-        if (Serial.peek() == -1) {
-          memset(buf, NULL, BUFFSIZE);
-          tmp = String(ssid) + "\n" + "Corrupt";
-          tmp.toCharArray(buf, BUFFSIZE);
-          writeToDisplay("Status", buf);
-          corrupt = true;
-#if DEBUG
-          Serial.println("Data Missing");
-#endif
-          break;
-        }
-      }
-      strcpy(sVal, msg);
-      if (!corrupt) {
-        memset(buf, NULL, BUFFSIZE);
-        tmp = String(ssid) + "\n" + "Sending";
-        tmp.toCharArray(buf, BUFFSIZE);
-        writeToDisplay("Status", buf);
-        if (sAddr[0] == '[') {         // Data
-          memset(topic, NULL, BUFFSIZE);
-          strcat(topic, "DATA/");
-          strcat(topic, sAddr);
-#if DEBUG
-          Serial.println(topic);
-          Serial.println(sVal);
-#endif
-          if (aerServer.publish(topic, sVal)) {
-            memset(buf, NULL, BUFFSIZE);
-            tmp = String(ssid) + "\n" + "Sent";
-            tmp.toCharArray(buf, BUFFSIZE);
-            writeToDisplay("Status", buf);
-#if DEBUG
-            Serial.println("Msg Sent!");
-#endif
-          }
-          else {
-            memset(buf, NULL, BUFFSIZE);
-            tmp = String(ssid) + "\n" + "Failed";
-            tmp.toCharArray(buf, BUFFSIZE);
-            writeToDisplay("Status", buf);
-#if DEBUG
-            Serial.println("Msg Failed!");
-#endif
-          }
-        }
-        else {                         // Runtime Info
-          memset(topic, NULL, BUFFSIZE);
-          strcat(topic, "System/");
-          strcat(topic, sAddr);
-#if DEBUG
-          Serial.println(topic);
-          Serial.println(sVal);
-#endif
-          if (aerServer.publish(topic, sVal)) {
-            memset(buf, NULL, BUFFSIZE);
-            tmp = String(ssid) + "\n" + "Sent";
-            tmp.toCharArray(buf, BUFFSIZE);
-            writeToDisplay("Status", buf);
-#if DEBUG
-            Serial.println("Msg Sent!");
-#endif
-          }
-          else {
-            memset(buf, NULL, BUFFSIZE);
-            tmp = String(ssid) + "\n" + "Failed";
-            tmp.toCharArray(buf, BUFFSIZE);
-            writeToDisplay("Status", buf);
-#if DEBUG
-            Serial.println("Msg Failed!");
-#endif
-          }
-        }
-        if (!digitalRead(BUTTON)) {
-          Serial.readString();
-          btnHandler();
-        }
-      }
-    }
-  }
-  if (!digitalRead(BUTTON)) {
-    Serial.readString();
-    btnHandler();
-  }
-  aerServer.loop();
-  delay(100);
+//------------------------------------------------------
+// Breaks down incomming serial message to 3 sections
+// Returns sensors count, address, string index and data
+// Message format: COUNT:ADDR:STRING:VALUE:CRC8
+//-------------------------------------------------------
+bool parseData(char* msg, int* count, char* addr, int* st, char* val)
+{
+  // Getting sensors count
+  char *p = strtok(msg, DELIM);
+  if (p == NULL) return 1;
+  sscanf(p, "%d", count);
+  // Getting sensor address
+  p = strtok(NULL, DELIM);
+  if (p == NULL) return 1;
+  strcpy(addr, p);
+  // Getting sensor string index
+  p = strtok(NULL, DELIM);
+  if (p == NULL) return 1;
+  sscanf(p, "%d", st);
+  // Getting sensor value
+  p = strtok(NULL, DELIM);
+  if (p == NULL) return 1;
+  strcpy(val, p);
+  return 0;
 }
