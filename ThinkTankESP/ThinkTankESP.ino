@@ -12,22 +12,18 @@
 #include <SPI.h>              // For SPI comm (needed for not getting compile error)
 #include <Wire.h>             // For I2C comm
 #include <OneWire.h>          // Used only for crc8 algorithm (no object instantiated)
-//#include <SoftwareSerial.h>   // Used for communication between ESP and Arduino
+
 //
 //  DEFINITIONS
 //
 #define DEVICE_ID     8       // This device's unique ID as seen in the database
 #define BUFFSIZE      80      // Size for all character buffers
-#define TIMEOUT       60      // Timeout for putting ESP into soft AP mode
 #define AP_SSID       "ThinkTank" // Name of soft-AP network
 #define DELIM         ":"     // Delimeter for serial communication
 #define SUBSCRIPTION  "8/CONTROL/TIME" // MQTT topic to change sample time
 // Pin defines
 #define BUTTON        14      // Interrupt to trigger soft AP mode
 #define STATUS_LIGHT  13      // Light to indicate that HTTP server is running
-#define OLED_RESET    15      // Pin 15 -RESET digital signal
-#define RX            2       // SoftSerial COM RX
-#define TX            16      // SoftSerial COM TX
 #define COUNT_EVERY   20      // Send device count every N messages
 #define WIFI_HEADER     "   WiFi"
 #define SENSORS_HEADER  "  Sensors"
@@ -39,27 +35,26 @@ char password[BUFFSIZE];      // Wi-Fi password
 char ip[BUFFSIZE] = "192.168.4.1";  // Default soft-AP ip address
 char buf[BUFFSIZE];           // Temporary buffer for building messages on display
 volatile bool apMode = false; // Flag to dermine current mode of operation
+volatile bool newAP = false;
 volatile bool prev_state = false;
 volatile int loop_count = 0;
 
 // Create Library Object password
-AERClient aerServer(DEVICE_ID);  // publishing to IoT cloud
+AERClient aerClient(DEVICE_ID);  // publishing to IoT cloud
 ESP8266WebServer server(80);     // webServer
 //SoftwareSerial Arduino(RX, TX);  // for Serial
-ESP_SSD1306 display(OLED_RESET); // for I2C
+ESP_SSD1306 display(15); // for I2C
 
 //
-//  MAIN
+//  SETUP
 //
 void setup()
 {
-  // Erasing old wifi configs
-  ESP.eraseConfig();
+  // If the config in EEPROM is messed up uncomment and flush once
+  //ESP.eraseConfig();
 
   // COM
   Serial.begin(9600);
-  //Arduino.begin(9600);
-  delay(100);  // Wait for serial port to connect
   Serial.println("\n--- START ---");
 
   // GPIO
@@ -72,56 +67,29 @@ void setup()
   delay(2000);           // Display logo
   display.clearDisplay();
 
-  // get SSID and password from EEPROM
-  EEPROM.begin(512);
-  strcpy(ssid, getString(0));
-  strcpy(password, getString(BUFFSIZE));
-    
   // Initialization and connection to WiFi
-  sprintf(buf, "%s\nConnecting\n...", ssid);
+  sprintf(buf, "%s\nConnecting\n...", WiFi.SSID().c_str());
   writeToDisplay(WIFI_HEADER, buf);
 
   // Attemp to connect to AP and print status
-  printWiFiState(aerServer.init(ssid, password));
-
-  // Set a callback function for MQTT
-  void (*pCallback)(char*, byte*, unsigned int);
-  pCallback = &callback;
-  aerServer.subscribe(SUBSCRIPTION, pCallback);
+  uint8_t result = aerClient.init();
+  printWiFiStatus(result);
 }
 
+//
+//  LOOP
+//
 void loop()
 {
   char addr[BUFFSIZE], topic[BUFFSIZE], val[BUFFSIZE], *p;
   int _string = 0, count = 0;
-  bool result;
+  uint8_t result;
 
   //
   //  WiFi connected, streaming Serial data
   //
   if (!apMode)
   {
-    //Serial.println("WiFiConnected() => " + String(aerServer.wifiConnected()));
-    /*
-      if (aerServer.wifiConnected() != connected)
-      {
-      connected = aerServer.wifiConnected();
-      if (connected) {
-        sprintf(buf, "%s\n  ONLINE", ssid);
-        writeToDisplay(WIFI_HEADER, buf);
-        // Set a callback function for MQTT
-        void (*pCallback)(char*, byte*, unsigned int);
-        pCallback = &callback;
-        aerServer.subscribe(SUBSCRIPTION, pCallback);
-      } else {
-        Serial.println("Connection timed out");
-        Serial.print("SSID: ");     Serial.println(ssid);
-        Serial.print("Password: "); Serial.println(password);
-        sprintf(buf, "%s\n  OFFLINE", ssid);
-        writeToDisplay(WIFI_HEADER, buf);
-      }
-      }
-    */
     if (Serial.available() > 0)
     {
       // Reading incomming data
@@ -148,7 +116,7 @@ void loop()
         loop_count = 0;
         // Sending device count
         sprintf(buf, "%d", count);
-        result = aerServer.publish("System/DeviceCount", buf);
+        result = aerClient.publish("System/DeviceCount", buf);
         if (!result) Serial.println("Send: FAILED");
         delay(10);
       }
@@ -157,24 +125,27 @@ void loop()
       sprintf(buf, "%s%d", DELIM, _string);
       strcat(val, buf);
       Serial.print(topic); Serial.println(val);
-      result = aerServer.publish(topic, val);
+      result = aerClient.publish(topic, val);
       if (!result) Serial.println("Send: FAILED");
-
-      // Update display on every state change
-      if (result != prev_state)
-      {
-        prev_state = result;  // save the new state
-        printWiFiState(result);
-      }
     }
 
   }
   //  AP Mode
   else
+  {
     server.handleClient();
+    // New Ap was set
+    if (newAP)
+    {
+      apMode = false; newAP = false;
+      // Attemp to connect to AP and print status
+      result = aerClient.init(ssid, password);
+      printWiFiStatus(result);
+    }
+  }
 
   //
-  //  AP Button was pressed
+  //  Switch to AP mode
   //
   if (!digitalRead(BUTTON) && !apMode)
   {
@@ -183,14 +154,8 @@ void loop()
     // LED indicator ON
     digitalWrite(STATUS_LIGHT, HIGH);
     // Disconnect from MQTT
-    aerServer.disconnect();
-    // Disconnect from the router
-    WiFi.disconnect(true);
-    // Turn WiFi Off
-    //ESP.eraseConfig();
-    WiFi.mode(WIFI_OFF);
-    // Setting AP station on
-    WiFi.mode(WIFI_AP_STA);// WiFi.mode(WIFI_AP_STA);
+    aerClient.disconnect();
+    WiFi.mode(WIFI_AP_STA); // WiFi.mode(WIFI_AP_STA);
     // Starting softAP
     if (!WiFi.softAP(AP_SSID))
       return;
@@ -203,7 +168,6 @@ void loop()
       server.send(200, "text/plain", "this works without need of authentification");
     });
     server.onNotFound(handleNotFound);
-
     //here the list of headers to be recorded
     const char * headerkeys[] = {
       "User-Agent", "Cookie"
@@ -224,7 +188,6 @@ void loop()
   // must be < 125ms to read serial from arduino reliably
   delay(90);
 }
-
 
 //
 //  FUNCTIONS
@@ -291,7 +254,7 @@ void handleSubmit() {
   Serial.println("Restarting");
   WiFi.softAPdisconnect(); delay(500);
   WiFi.mode(WIFI_OFF); delay(500);
-  ESP.restart();
+  newAP = true; // Flag that we received new AP parameters
 }
 
 //------------------------------------------------------
@@ -303,18 +266,9 @@ void handleRoot() {
   String htmlmsg;
   if (server.hasArg("SSID") && server.hasArg("PASSWORD"))
   {
-    char newSSID[BUFFSIZE];
-    char newPw[BUFFSIZE];
-    memset(newSSID, NULL, BUFFSIZE);
-    memset(newPw, NULL, BUFFSIZE);
-    server.arg("SSID").toCharArray(newSSID, BUFFSIZE);
-    server.arg("PASSWORD").toCharArray(newPw, BUFFSIZE);
-
-    for (int i = 0; i < BUFFSIZE; i++) {
-      EEPROM.write(i, newSSID[i]);              // Write SSID to EEPROM
-      EEPROM.write((i + BUFFSIZE), newPw[i]);   // Write Password to EEPROM
-    }
-    EEPROM.commit();
+    server.arg("SSID").toCharArray(ssid, BUFFSIZE);
+    server.arg("PASSWORD").toCharArray(password, BUFFSIZE);
+    newAP = true; // Flag that we received new AP parameters
 
     server.sendContent("HTTP/1.1 301 OK\r\nLocation: /success\r\nCache-Control: no-cache\r\n\r\n");
     return;
@@ -344,18 +298,6 @@ void handleNotFound() {
     message += " " + server.argName(i) + ": " + server.arg(i) + "\n";
   server.send(404, "text/plain", message);
 }
-
-//------------------------------------------------------
-// Hardware interrupt triggered by button press. Starts
-// soft AP mode
-// @param none
-// @return void
-//-------------------------------------------------------
-void btnHandler()
-{
-
-}
-
 
 //------------------------------------------------------
 // Read string of characters from serial monitor
@@ -431,21 +373,36 @@ bool parseData(char* msg, int* count, char* addr, int* st, char* val)
 }
 
 //------------------------------------------------------
-// Breaks down incomming serial message to 3 sections
-// Returns sensors count, address, string index and data
-// Message format: COUNT:ADDR:STRING:VALUE:CRC8
+// Printf WiFi result code the LCD and over Serial
 //-------------------------------------------------------
-void printWiFiState(bool status)
+void printWiFiStatus (uint8_t status)
 {
-  // ONLINE //
-  if (status) {
-    sprintf(buf, "%s\n  ONLINE", ssid);
-    writeToDisplay(WIFI_HEADER, buf);
-    // OFFLINE //
-  } else {
-    Serial.println("Connection timed out");
-    sprintf(buf, "%s\n  OFFLINE", ssid);
-    writeToDisplay(WIFI_HEADER, buf);
+  switch (status)
+  {
+    case WL_CONNECTED:
+      Serial.println("Wifi Connected, SSID: " + WiFi.SSID() + " PSK: " + WiFi.psk());
+      // Print on display
+      sprintf(buf, "%s\n  ONLINE", WiFi.SSID().c_str());
+      writeToDisplay(WIFI_HEADER, buf);
+      // Set a callback function for MQTT
+      void (*pCallback)(char*, byte*, unsigned int);
+      pCallback = &callback;
+      aerClient.subscribe(SUBSCRIPTION, pCallback);
+      break;
+    case WL_NO_SSID_AVAIL:
+      Serial.println("SSID not found, SSID: " + WiFi.SSID() + " PSK: " + WiFi.psk());
+      sprintf(buf, "%s\nCan't find", WiFi.SSID().c_str());
+      writeToDisplay(WIFI_HEADER, buf);
+      break;
+    case WL_CONNECT_FAILED:
+      Serial.println("Wrong password, SSID: " + WiFi.SSID() + " PSK: " + WiFi.psk());
+      sprintf(buf, "%s\nPassword\nincorrect", WiFi.SSID().c_str());
+      writeToDisplay(WIFI_HEADER, buf);
+      break;
+    default:
+      Serial.println("WiFi error, SSID: " + WiFi.SSID() + " PSK: " + WiFi.psk());
+      sprintf(buf, "%s\n  OFFLINE", ssid);
+      writeToDisplay(WIFI_HEADER, buf);
+      break;
   }
 }
-
