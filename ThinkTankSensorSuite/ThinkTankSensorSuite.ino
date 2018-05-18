@@ -5,21 +5,16 @@
 
 #include <OneWire.h>                // Library for One-Wire interface
 #include <DallasTemperature.h>      // Library for DS18B20 temp. sensor
-#include <SoftwareSerial.h>
 
 //
 //  DEFINITIONS
 //
-#define DELIM ":"
-#define RX 3
-#define TX 2
-SoftwareSerial ESP(RX, TX);
-
 #define ONE_WIRE_GPIO   4          // pins 4 to 11 are used to for one wire strips
 #define ONE_WIRE_LENGTH 8          // The number of pins used by the bus
 #define CALLIBRATION    0          // Used to callibrate the sensors (in C)
-#define MAX_SENSORS     20         // Allowed maximum number of sensors
-#define MESSAGE_DELAY   250        // Delay in ms between serial message
+#define MAX_SENSORS     80         // Allowed maximum number of sensors
+#define MESSAGE_DELAY   200        // Delay in ms between serial message
+#define DELIM           ":"
 
 // Setting up the interface for OneWire communication
 OneWire oneWireBus[]  = {
@@ -56,11 +51,8 @@ struct oneWire_struct {
 void setup()
 {
   // communication
-  Serial.begin(115200); // DEBUG
-  ESP.begin(9600);
-  Serial.println("--- START ---");
+  Serial.begin(38400); // DEBUG
 }
-
 void loop()
 {
   // Creating memory for Sensors - static
@@ -95,7 +87,7 @@ uint8_t TempSensors_init ()
   return _count;
 }
 
-// Reading one sensor
+// Reading temp sensors from all the strings
 // Modifing pointer for one sensor with address and value
 void TempSensors_getTemp(oneWire_struct **_sensor)
 {
@@ -142,9 +134,7 @@ void sendValues(oneWire_struct* TempSensor, uint8_t count)
     strcat(buff, temp);
     // Printing
     Serial.println(buff);
-    ESP.println(buff);
     // Delay between serial messages
     delay(MESSAGE_DELAY);
   }
-  Serial.println("\n");
 }

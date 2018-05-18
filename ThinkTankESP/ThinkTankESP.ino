@@ -6,7 +6,6 @@
 
 #include <AERClient.h>
 #include <ESP8266WebServer.h>
-#include <EEPROM.h>
 #include <ESP_SSD1306.h>      // Modification of Adafruit_SSD1306 for ESP8266 compatibility
 #include <Adafruit_GFX.h>     // Needs a little change in original Adafruit library (See README.txt file)
 #include <SPI.h>              // For SPI comm (needed for not getting compile error)
@@ -54,7 +53,7 @@ void setup()
   //ESP.eraseConfig();
 
   // COM
-  Serial.begin(9600);
+  Serial.begin(38400);
   Serial.println("\n--- START ---");
 
   // GPIO
@@ -94,19 +93,15 @@ void loop()
     {
       // Reading incomming data
       readString(buf, sizeof(buf));
-      Serial.println();
-      Serial.println(buf);
 
       // Validating all sections + CRC
       if (validityCheck(buf) == 1)
       {
-        Serial.println("Validation FAILED");
         return;   // Do not go further and post
       }
       // Breaking messsage down to sensor addres, string and value
       if (parseData(buf, &count, addr, &_string, val))
       {
-        Serial.println("Parsing FAILED");
         return;
       }
       // Sending device count every 5 sensors
@@ -124,7 +119,6 @@ void loop()
       sprintf(topic, "Data/%s", addr);
       sprintf(buf, "%s%d", DELIM, _string);
       strcat(val, buf);
-      Serial.print(topic); Serial.println(val);
       result = aerClient.publish(topic, val);
       if (!result) Serial.println("Send: FAILED");
     }
@@ -137,6 +131,7 @@ void loop()
     // New Ap was set
     if (newAP)
     {
+      digitalWrite(STATUS_LIGHT, LOW);
       apMode = false; newAP = false;
       // Attemp to connect to AP and print status
       result = aerClient.init(ssid, password);
@@ -176,7 +171,6 @@ void loop()
     //ask server to track these headers
     server.collectHeaders(headerkeys, headerkeyssize );
     server.begin();
-    Serial.println("HTTP server started");
 
     // setting status True
     apMode = true;
@@ -187,25 +181,6 @@ void loop()
 
   // must be < 125ms to read serial from arduino reliably
   delay(90);
-}
-
-//
-//  FUNCTIONS
-//
-//------------------------------------------------------
-// Get a string from EEPROM
-// @param startAddr the starting address of the string in EEPROM
-// @return char* the current string at the address given by startAddr
-//-------------------------------------------------------
-char* getString(int startAddr)
-{
-  char str[BUFFSIZE];
-  memset(str, '\0', BUFFSIZE);
-
-  for (int i = 0; i < BUFFSIZE; i ++)
-    str[i] = char(EEPROM.read(startAddr + i));
-
-  return str;
 }
 
 //------------------------------------------------------
@@ -248,10 +223,9 @@ void writeToDisplay(char* header, char* msg) {
 void handleSubmit() {
   String content = "<html><body><H2>WiFi information updated!</H2><br>";
   server.send(200, "text/html", content);
-  delay(5000);
+  delay(2000);
   // Shutdown routine
   digitalWrite(STATUS_LIGHT, LOW);
-  Serial.println("Restarting");
   WiFi.softAPdisconnect(); delay(500);
   WiFi.mode(WIFI_OFF); delay(500);
   newAP = true; // Flag that we received new AP parameters
