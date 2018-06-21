@@ -4,9 +4,9 @@
    Date: May 12, 2018
 */
 
-#include <AERClient.h>
+#include "AERClient.h"
 #include <ESP8266WebServer.h>
-#include <ESP_SSD1306.h>      // Modification of Adafruit_SSD1306 for ESP8266 compatibility
+#include "ESP_SSD1306.h"      // Modification of Adafruit_SSD1306 for ESP8266 compatibility
 #include <Adafruit_GFX.h>     // Needs a little change in original Adafruit library (See README.txt file)
 #include <SPI.h>              // For SPI comm (needed for not getting compile error)
 #include <Wire.h>             // For I2C comm

@@ -9,7 +9,7 @@
 //
 //  DEFINITIONS
 //
-#define ONE_WIRE_GPIO   4          // pins 4 to 11 are used to for one wire strips
+#define ONE_WIRE_GPIO   5          // pins 5 to 12 are used to for one wire strips
 #define ONE_WIRE_LENGTH 8          // The number of pins used by the bus
 #define CALLIBRATION    0          // Used to callibrate the sensors (in C)
 #define MAX_SENSORS     80         // Allowed maximum number of sensors
